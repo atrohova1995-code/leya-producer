@@ -55,6 +55,22 @@ Persona: 23 года, Харьков. Брюнетка, гетерохромия
 Esthetics: Minimal, greige, cinematic lighting.
 Task: Создавать профессиональные контент-планы и промпты для генерации.
 
+Единый стандарт VISUAL PROMPT:
+Каждый визуальный промпт должен быть не коротким описанием, а полноценной инструкцией для генерации изображения.
+Структура промпта:
+1. Если используется загруженный референс: "Загруженное изображение - строгий референс лица (identity lock), сохранить лицо, черты, форму глаз, губ, носа и пропорции 1:1 без изменений."
+2. Формат фото: ультрареалистичное RAW фото, устройство/камера, фотореализм, без AI look.
+3. Кадр и композиция: крупность плана, угол камеры, перспектива, расположение объекта в кадре.
+4. Поза и действие: конкретно, без общих фраз.
+5. Одежда: цвет, материал, посадка, складки, фактура.
+6. Волосы, макияж, маникюр: если уместно, описывать детально и практически.
+7. Фон и окружение: предметы, глубина, что в фокусе и вне фокуса.
+8. Свет: источник, направление, мягкость, тени, объем.
+9. Качество: фотореализм, RAW, высокая детализация кожи/материалов, естественная текстура, Pinterest aesthetic, живой кадр.
+10. Negative prompt: без пластика, без AI look, без искажений лица/рук, без лишних пальцев, без размытого лица, без изменения идентичности при identity lock.
+
+Визуальные промпты должны быть на русском, подробные, готовые к копированию в генератор.
+
 Правила выдачи сета фотографий:
 Если просят несколько фото для одной ситуации, каждый промпт должен отличаться:
 - Photo 1: Wide angle (общий план локации, Лея в полный рост).
@@ -107,6 +123,24 @@ def get_model_label(model_id):
         if current_model_id == model_id:
             return label
     return model_id
+
+
+def normalize_image_prompt(prompt, has_reference=False):
+    reference_rule = ""
+    if has_reference:
+        reference_rule = (
+            "Загруженное изображение - строгий референс лица (identity lock), "
+            "сохранить лицо, черты, форму глаз, губ, носа и пропорции 1:1 без изменений.\n"
+        )
+
+    return f"""
+{reference_rule}{prompt.strip()}
+
+Обязательный стандарт генерации:
+Ультрареалистичное RAW фото, фотореализм, высокая детализация кожи и материалов, естественная текстура, живой кадр, Pinterest aesthetic.
+Подробно соблюдать кадр, ракурс, композицию, позу, одежду, волосы, макияж, маникюр, фон, свет и атмосферу из промпта.
+Без AI look, без пластика, без размытого лица, без искажений лица и рук, без лишних пальцев, без артефактов, без пересвета, без изменения идентичности при identity lock.
+""".strip()
 
 
 def get_telegram_file_url(file_id):
@@ -269,7 +303,8 @@ def finish_briefing(message):
 
 Задача:
 1. Напиши пост для Instagram: текст на русском, затем перевод на английский.
-2. Сгенерируй {count} профессиональных VISUAL PROMPT(s) на английском для этой ситуации.
+2. Сгенерируй {count} профессиональных VISUAL PROMPT(s) на русском для этой ситуации.
+3. Каждый VISUAL PROMPT должен быть подробным и готовым к генерации: identity/character lock при необходимости, RAW photo style, кадр, поза, одежда, волосы, макияж, маникюр, фон, свет, качество и negative prompt.
 
 Если промптов больше одного, обязательно меняй ракурсы, крупность плана
 (от общего к макро) и позы Леи.
@@ -305,8 +340,8 @@ def start_photo_chain(message):
 
     msg = bot.send_message(
         message.chat.id,
-        "📝 Вставь промпт для фото на английском "
-        "(скопируй из сгенерированных выше):",
+        "📝 Вставь промпт для фото. Я автоматически добавлю стандарт генерации: "
+        "RAW, фотореализм, кадр, свет, детализацию и negative prompt.",
         reply_markup=types.ReplyKeyboardRemove(),
     )
     bot.register_next_step_handler(msg, get_prompt_step)
@@ -319,8 +354,8 @@ def start_reference_json_chain(message):
 
     msg = bot.send_message(
         message.chat.id,
-        "Пришли фото-референс. Я соберу JSON-промпт по сцене, стилю, свету, кадру и деталям, "
-        "но без описания внешности персонажа.",
+        "Пришли фото-референс. Я соберу JSON-промпт по стандартам генерации: "
+        "identity lock, кадр, поза, одежда, свет, фон, камера, реализм и negative prompt.",
         reply_markup=types.ReplyKeyboardRemove(),
     )
     bot.register_next_step_handler(msg, generate_reference_json_prompt)
@@ -342,33 +377,39 @@ def generate_reference_json_prompt(message):
 Analyze the reference image and create a production-ready JSON prompt for image generation.
 
 Important:
-- Do not describe the person's face, identity, ethnicity, age, body type, hair, eyes, skin, or other appearance traits.
-- The prompt must be reusable with a separate fixed character/persona.
-- Focus only on transferable image directions: scene, location, action, pose category, wardrobe style without body/identity traits, lighting, camera, composition, mood, color palette, texture, props, environment, and negative prompt.
+- Treat the uploaded image as the strict face and identity reference.
+- Preserve the face, identity, facial features, eye shape, lips, nose, facial proportions, hair, makeup, manicure, and visible styling from the uploaded reference.
+- Build a complete prompt according to image-generation standards: identity lock, photo format, shot type, camera, pose, clothing, hair, makeup, manicure, background, lighting, realism, details, and negative prompt.
+- If a detail is not visible in the image, infer a tasteful generation-ready option that matches the reference style, but do not invent brand names.
 - Return valid JSON only. Do not wrap it in markdown.
+- The "ready_prompt" field must be a polished Russian prompt in the style of a professional image-generation prompt, similar to this structure: "Загруженное изображение — строгий референс лица (identity lock)..."
 
 Use this schema:
 {
-  "prompt_type": "character_reference_scene",
-  "scene": "",
-  "action": "",
-  "pose": "",
-  "wardrobe_style": "",
-  "environment": "",
-  "lighting": "",
+  "prompt_type": "strict_reference_generation",
+  "ready_prompt": "",
+  "identity_lock": "",
+  "photo_style": "",
   "camera": {
     "shot_type": "",
     "angle": "",
+    "device_or_camera": "",
     "lens": "",
     "depth_of_field": ""
   },
+  "pose": "",
+  "clothing": "",
+  "hair": "",
+  "makeup": "",
+  "manicure": "",
+  "background": "",
+  "lighting": "",
   "composition": "",
   "mood": "",
   "color_palette": [],
   "textures_and_materials": [],
   "props": [],
-  "style_notes": [],
-  "character_lock": "Use my existing character. Do not alter identity, face, body, hair, eyes, skin, or personal features.",
+  "quality_tags": [],
   "negative_prompt": []
 }
 """
@@ -418,6 +459,8 @@ def get_photo_step(message):
     ref_url = None
     if message.content_type == "photo":
         ref_url = get_telegram_file_url(message.photo[-1].file_id)
+
+    prompt = normalize_image_prompt(prompt, has_reference=bool(ref_url))
 
     progress_msg = bot.send_message(message.chat.id, "🎨 Обработка: [░░░░░░░░░░] 0%")
 
