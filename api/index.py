@@ -14,6 +14,7 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+DEFAULT_TEXT_MODEL = os.getenv("DEFAULT_TEXT_MODEL", "gpt-5.5")
 
 REQUIRED_ENV_VARS = {
     "TELEGRAM_TOKEN": TELEGRAM_TOKEN,
@@ -29,11 +30,24 @@ if SUPABASE_URL and SUPABASE_KEY:
     supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 user_states = {}
+user_settings = {}
 
 BTN_CREATE_POST = "📝 Создать пост + фото"
 BTN_CREATE_SET = "📸 Создать Фото-Сет"
 BTN_IMAGE_GENERATOR = "🖼 Генератор картинок"
+BTN_REFERENCE_JSON = "🧩 JSON из референса"
 BTN_SAVE_LORE = "💾 Сохранить лор"
+BTN_SETTINGS = "⚙️ Настройки"
+BTN_BACK = "⬅️ Назад"
+
+TEXT_MODELS = {
+    "GPT-5.5": "gpt-5.5",
+    "GPT-5.4": "gpt-5.4",
+    "GPT-5.4 Mini": "gpt-5.4-mini",
+    "GPT-5.3 Codex": "gpt-5.3-codex",
+}
+
+MODEL_BUTTONS = {f"🤖 {label}" for label in TEXT_MODELS}
 
 SYSTEM_PROMPT = """
 Role: Ты - Арт-Директор и Продюсер AI-инфлюенсера Leya.
@@ -57,13 +71,47 @@ def get_main_keyboard():
         types.KeyboardButton(BTN_CREATE_POST),
         types.KeyboardButton(BTN_CREATE_SET),
         types.KeyboardButton(BTN_IMAGE_GENERATOR),
+        types.KeyboardButton(BTN_REFERENCE_JSON),
         types.KeyboardButton(BTN_SAVE_LORE),
+        types.KeyboardButton(BTN_SETTINGS),
     )
+    return markup
+
+
+def get_settings_keyboard():
+    markup = types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
+    markup.add(*(types.KeyboardButton(f"🤖 {label}") for label in TEXT_MODELS))
+    markup.add(types.KeyboardButton(BTN_BACK))
     return markup
 
 
 def get_state(chat_id):
     return user_states.setdefault(chat_id, {})
+
+
+def get_settings(chat_id):
+    return user_settings.setdefault(chat_id, {"text_model": DEFAULT_TEXT_MODEL})
+
+
+def get_selected_text_model(chat_id):
+    settings = get_settings(chat_id)
+    model = settings.get("text_model", DEFAULT_TEXT_MODEL)
+    if model not in TEXT_MODELS.values():
+        model = DEFAULT_TEXT_MODEL
+        settings["text_model"] = model
+    return model
+
+
+def get_model_label(model_id):
+    for label, current_model_id in TEXT_MODELS.items():
+        if current_model_id == model_id:
+            return label
+    return model_id
+
+
+def get_telegram_file_url(file_id):
+    file_info = bot.get_file(file_id)
+    return f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_info.file_path}"
 
 
 def get_missing_env_vars():
@@ -112,6 +160,43 @@ def start(message):
         "Привет, Саша! Я твой Контент-Завод для Леи. Что будем делать сегодня?",
         reply_markup=get_main_keyboard(),
     )
+
+
+@bot.message_handler(func=lambda message: message.text == BTN_SETTINGS)
+def show_settings(message):
+    if not ensure_configured(message):
+        return
+
+    model_id = get_selected_text_model(message.chat.id)
+    bot.send_message(
+        message.chat.id,
+        "Настройки\n\n"
+        f"Текущая модель текста: {get_model_label(model_id)} ({model_id})\n"
+        "Модель картинок: GPT Image 2 (gpt-image-2)",
+        reply_markup=get_settings_keyboard(),
+    )
+
+
+@bot.message_handler(func=lambda message: message.text in MODEL_BUTTONS)
+def change_text_model(message):
+    label = message.text.replace("🤖 ", "", 1)
+    model_id = TEXT_MODELS.get(label)
+    if not model_id:
+        bot.send_message(message.chat.id, "Не знаю такую модель.", reply_markup=get_settings_keyboard())
+        return
+
+    settings = get_settings(message.chat.id)
+    settings["text_model"] = model_id
+    bot.send_message(
+        message.chat.id,
+        f"Готово. Для текстовой генерации выбрана {label} ({model_id}).",
+        reply_markup=get_main_keyboard(),
+    )
+
+
+@bot.message_handler(func=lambda message: message.text == BTN_BACK)
+def back_to_main_menu(message):
+    bot.send_message(message.chat.id, "Главное меню.", reply_markup=get_main_keyboard())
 
 
 @bot.message_handler(func=lambda message: message.text in [BTN_CREATE_POST, BTN_CREATE_SET])
@@ -173,7 +258,8 @@ def finish_briefing(message):
 
     bot.send_message(
         message.chat.id,
-        "⚙️ Бриф принят! Иду генерировать контент. Это займет 15-20 секунд...",
+        f"⚙️ Бриф принят! Генерирую через {get_model_label(get_selected_text_model(message.chat.id))}. "
+        "Это займет 15-20 секунд...",
         reply_markup=get_main_keyboard(),
     )
 
@@ -198,7 +284,7 @@ def finish_briefing(message):
             history = "Начало."
 
         ai_res = client_ai.chat.completions.create(
-            model="gpt-5.5",
+            model=get_selected_text_model(message.chat.id),
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": f"Память:\n{history}\n\n{task}"},
@@ -226,6 +312,88 @@ def start_photo_chain(message):
     bot.register_next_step_handler(msg, get_prompt_step)
 
 
+@bot.message_handler(func=lambda message: message.text == BTN_REFERENCE_JSON)
+def start_reference_json_chain(message):
+    if not ensure_configured(message):
+        return
+
+    msg = bot.send_message(
+        message.chat.id,
+        "Пришли фото-референс. Я соберу JSON-промпт по сцене, стилю, свету, кадру и деталям, "
+        "но без описания внешности персонажа.",
+        reply_markup=types.ReplyKeyboardRemove(),
+    )
+    bot.register_next_step_handler(msg, generate_reference_json_prompt)
+
+
+def generate_reference_json_prompt(message):
+    if message.content_type != "photo":
+        bot.send_message(
+            message.chat.id,
+            "Нужно отправить именно фото-референс. Попробуй еще раз.",
+            reply_markup=get_main_keyboard(),
+        )
+        return
+
+    ref_url = get_telegram_file_url(message.photo[-1].file_id)
+    progress_msg = bot.send_message(message.chat.id, "🧩 Анализирую референс и собираю JSON...")
+
+    instruction = """
+Analyze the reference image and create a production-ready JSON prompt for image generation.
+
+Important:
+- Do not describe the person's face, identity, ethnicity, age, body type, hair, eyes, skin, or other appearance traits.
+- The prompt must be reusable with a separate fixed character/persona.
+- Focus only on transferable image directions: scene, location, action, pose category, wardrobe style without body/identity traits, lighting, camera, composition, mood, color palette, texture, props, environment, and negative prompt.
+- Return valid JSON only. Do not wrap it in markdown.
+
+Use this schema:
+{
+  "prompt_type": "character_reference_scene",
+  "scene": "",
+  "action": "",
+  "pose": "",
+  "wardrobe_style": "",
+  "environment": "",
+  "lighting": "",
+  "camera": {
+    "shot_type": "",
+    "angle": "",
+    "lens": "",
+    "depth_of_field": ""
+  },
+  "composition": "",
+  "mood": "",
+  "color_palette": [],
+  "textures_and_materials": [],
+  "props": [],
+  "style_notes": [],
+  "character_lock": "Use my existing character. Do not alter identity, face, body, hair, eyes, skin, or personal features.",
+  "negative_prompt": []
+}
+"""
+
+    try:
+        ai_res = client_ai.chat.completions.create(
+            model=get_selected_text_model(message.chat.id),
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": instruction},
+                        {"type": "image_url", "image_url": {"url": ref_url}},
+                    ],
+                }
+            ],
+        )
+        json_prompt = ai_res.choices[0].message.content
+        bot.delete_message(message.chat.id, progress_msg.message_id)
+        bot.send_message(message.chat.id, json_prompt, reply_markup=get_main_keyboard())
+    except Exception as error:
+        bot.edit_message_text(f"❌ Не удалось собрать JSON-промпт: {error}", message.chat.id, progress_msg.message_id)
+        bot.send_message(message.chat.id, "Попробуем другой референс?", reply_markup=get_main_keyboard())
+
+
 def get_prompt_step(message):
     if not message.text:
         bot.send_message(message.chat.id, "Отмена.", reply_markup=get_main_keyboard())
@@ -249,8 +417,7 @@ def get_photo_step(message):
 
     ref_url = None
     if message.content_type == "photo":
-        file_info = bot.get_file(message.photo[-1].file_id)
-        ref_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_info.file_path}"
+        ref_url = get_telegram_file_url(message.photo[-1].file_id)
 
     progress_msg = bot.send_message(message.chat.id, "🎨 Обработка: [░░░░░░░░░░] 0%")
 
