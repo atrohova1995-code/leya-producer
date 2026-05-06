@@ -148,6 +148,37 @@ def get_telegram_file_url(file_id):
     return f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_info.file_path}"
 
 
+def send_long_message(chat_id, text, reply_markup=None):
+    max_length = 3900
+    text = text or ""
+
+    if len(text) <= max_length:
+        bot.send_message(chat_id, text, reply_markup=reply_markup)
+        return
+
+    parts = []
+    remaining = text
+    while remaining:
+        if len(remaining) <= max_length:
+            parts.append(remaining)
+            break
+
+        split_at = remaining.rfind("\n\n", 0, max_length)
+        if split_at == -1:
+            split_at = remaining.rfind("\n", 0, max_length)
+        if split_at == -1:
+            split_at = remaining.rfind(". ", 0, max_length)
+        if split_at == -1:
+            split_at = max_length
+
+        parts.append(remaining[:split_at].strip())
+        remaining = remaining[split_at:].strip()
+
+    for index, part in enumerate(parts):
+        current_markup = reply_markup if index == len(parts) - 1 else None
+        bot.send_message(chat_id, part, reply_markup=current_markup)
+
+
 def get_missing_env_vars():
     return [name for name, value in REQUIRED_ENV_VARS.items() if not value]
 
@@ -328,7 +359,7 @@ def finish_briefing(message):
 
         final_text = ai_res.choices[0].message.content
         state["last_content"] = final_text
-        bot.send_message(message.chat.id, final_text)
+        send_long_message(message.chat.id, final_text)
     except Exception as error:
         bot.reply_to(message, f"❌ Ошибка генерации: {error}")
 
@@ -429,7 +460,7 @@ Use this schema:
         )
         json_prompt = ai_res.choices[0].message.content
         bot.delete_message(message.chat.id, progress_msg.message_id)
-        bot.send_message(message.chat.id, json_prompt, reply_markup=get_main_keyboard())
+        send_long_message(message.chat.id, json_prompt, reply_markup=get_main_keyboard())
     except Exception as error:
         bot.edit_message_text(f"❌ Не удалось собрать JSON-промпт: {error}", message.chat.id, progress_msg.message_id)
         bot.send_message(message.chat.id, "Попробуем другой референс?", reply_markup=get_main_keyboard())
