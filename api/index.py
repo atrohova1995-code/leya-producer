@@ -22,13 +22,11 @@ REQUIRED_ENV_VARS = {
     "SUPABASE_KEY": SUPABASE_KEY,
 }
 
-missing_env_vars = [name for name, value in REQUIRED_ENV_VARS.items() if not value]
-if missing_env_vars:
-    raise RuntimeError(f"Missing environment variables: {', '.join(missing_env_vars)}")
-
-bot = telebot.TeleBot(TELEGRAM_TOKEN, threaded=False)
-client_ai = OpenAI(api_key=OPENAI_API_KEY, base_url="https://codex.sale/v1")
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+bot = telebot.TeleBot(TELEGRAM_TOKEN or "missing-token", threaded=False)
+client_ai = OpenAI(api_key=OPENAI_API_KEY or "missing-key", base_url="https://codex.sale/v1")
+supabase: Client | None = None
+if SUPABASE_URL and SUPABASE_KEY:
+    supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 user_states = {}
 
@@ -68,8 +66,26 @@ def get_state(chat_id):
     return user_states.setdefault(chat_id, {})
 
 
+def get_missing_env_vars():
+    return [name for name, value in REQUIRED_ENV_VARS.items() if not value]
+
+
+def ensure_configured(message=None):
+    missing_env_vars = get_missing_env_vars()
+    if not missing_env_vars:
+        return True
+
+    error_text = "Не настроены переменные окружения: " + ", ".join(missing_env_vars)
+    if message:
+        bot.reply_to(message, f"❌ {error_text}")
+    return False
+
+
 @app.route("/", methods=["POST"])
 def webhook():
+    if get_missing_env_vars():
+        return "Missing environment variables", 500
+
     if not request.is_json:
         return "Expected JSON", 403
 
@@ -80,11 +96,17 @@ def webhook():
 
 @app.route("/", methods=["GET"])
 def index():
+    missing_env_vars = get_missing_env_vars()
+    if missing_env_vars:
+        return f"Content Factory needs setup: {', '.join(missing_env_vars)}"
     return "Content Factory Active"
 
 
 @bot.message_handler(commands=["start"])
 def start(message):
+    if not ensure_configured(message):
+        return
+
     bot.send_message(
         message.chat.id,
         "Привет, Саша! Я твой Контент-Завод для Леи. Что будем делать сегодня?",
@@ -94,6 +116,9 @@ def start(message):
 
 @bot.message_handler(func=lambda message: message.text in [BTN_CREATE_POST, BTN_CREATE_SET])
 def start_briefing(message):
+    if not ensure_configured(message):
+        return
+
     user_states[message.chat.id] = {
         "is_set": message.text == BTN_CREATE_SET,
         "step": 1,
@@ -189,6 +214,9 @@ def finish_briefing(message):
 
 @bot.message_handler(func=lambda message: message.text == BTN_IMAGE_GENERATOR)
 def start_photo_chain(message):
+    if not ensure_configured(message):
+        return
+
     msg = bot.send_message(
         message.chat.id,
         "📝 Вставь промпт для фото на английском "
@@ -255,6 +283,9 @@ def get_photo_step(message):
 
 @bot.message_handler(func=lambda message: message.text == BTN_SAVE_LORE)
 def save_db(message):
+    if not ensure_configured(message):
+        return
+
     state = get_state(message.chat.id)
     last_content = state.get("last_content")
 
