@@ -7,7 +7,7 @@ from supabase import create_client, Client
 
 app = Flask(__name__)
 
-# Ключи из настроек Vercel
+# Ключи из Vercel
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
 SUPABASE_URL = os.getenv('SUPABASE_URL')
@@ -17,17 +17,8 @@ bot = telebot.TeleBot(TELEGRAM_TOKEN, threaded=False)
 client_ai = OpenAI(api_key=OPENAI_API_KEY, base_url='https://codex.sale/v1')
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# Глобальный словарь для временного хранения выбора пользователя (в рамках сессии)
+# Хранилище состояний
 user_states = {}
-
-SYSTEM_PROMPT = """
-Role: Ты — Креативный ИИ-Продюсер для digital-persona Leya.
-Character: 23 года, брюнетка, гетерохромия (зеленый/голубой глаз), брекеты, ямочки. Стиль: soft cyber, cinematic. Характер: INFP, глубокая, меланхоличная, но теплая.
-Format:
-1. Событие дня (Lore): [описание]
-2. Промпт для поста: [инструкция]
-3. Visual Prompt: [English description for image generation]
-"""
 
 def get_main_keyboard():
     markup = types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
@@ -36,8 +27,9 @@ def get_main_keyboard():
     btn3 = types.KeyboardButton("🌆 Вечер")
     btn4 = types.KeyboardButton("🌃 Ночь")
     btn5 = types.KeyboardButton("✨ Свой сюжет")
-    btn6 = types.KeyboardButton("💾 Сохранить в память")
-    markup.add(btn1, btn2, btn3, btn4, btn5, btn6)
+    btn6 = types.KeyboardButton("🖼 Генерация фото")
+    btn7 = types.KeyboardButton("💾 Сохранить в память")
+    markup.add(btn1, btn2, btn3, btn4, btn5, btn6, btn7)
     return markup
 
 @app.route('/', methods=['POST'])
@@ -51,63 +43,102 @@ def webhook():
 
 @bot.message_handler(commands=['start'])
 def start(message):
-    bot.send_message(message.chat.id, "Привет! Я пульт управления Леей. Выбери время суток или нажми 'Свой сюжет', чтобы задать направление.", reply_markup=get_main_keyboard())
+    bot.send_message(message.chat.id, "Панель управления Леей активирована.", reply_markup=get_main_keyboard())
+
+# --- ЛОГИКА ГЕНЕРАЦИИ ИЗОБРАЖЕНИЙ ---
+
+@bot.message_handler(func=lambda message: message.text == "🖼 Генерация фото")
+def image_gen_start(message):
+    last_visual_prompt = user_states.get(message.chat.id, {}).get('last_visual_prompt')
+    
+    markup = types.InlineKeyboardMarkup()
+    if last_visual_prompt:
+        markup.add(types.InlineKeyboardButton("Использовать последний промпт", callback_data="use_last_prompt"))
+    markup.add(types.InlineKeyboardButton("Написать свой", callback_data="write_new_prompt"))
+    
+    bot.send_message(message.chat.id, "Давай создадим фото. Использовать промпт из последнего сценария или напишешь новый?", reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: call.data in ["use_last_prompt", "write_new_prompt"])
+def handle_image_choice(call):
+    if call.data == "use_last_prompt":
+        prompt = user_states.get(call.message.chat.id, {}).get('last_visual_prompt')
+        ask_for_reference(call.message, prompt)
+    else:
+        msg = bot.send_message(call.message.chat.id, "Пришли текстовое описание для фото (на английском):")
+        bot.register_next_step_handler(msg, lambda m: ask_for_reference(m, m.text))
+
+def ask_for_reference(message, prompt):
+    user_states[message.chat.id] = user_states.get(message.chat.id, {})
+    user_states[message.chat.id]['current_img_prompt'] = prompt
+    bot.send_message(message.chat.id, "Почти готово! Теперь можешь прислать ФОТО как референс или просто нажми /skip, чтобы генерировать без него.")
+
+@bot.message_handler(content_types=['photo'])
+def handle_photo_ref(message):
+    # Если мы ждем референс
+    if message.chat.id in user_states and 'current_img_prompt' in user_states[message.chat.id]:
+        # Получаем ссылку на фото
+        file_info = bot.get_file(message.photo[-1].file_id)
+        file_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_info.file_path}"
+        process_image_generation(message, user_states[message.chat.id]['current_img_prompt'], file_url)
+
+@bot.message_handler(commands=['skip'])
+def skip_reference(message):
+    if message.chat.id in user_states and 'current_img_prompt' in user_states[message.chat.id]:
+        process_image_generation(message, user_states[message.chat.id]['current_img_prompt'])
+
+def process_image_generation(message, prompt, ref_url=None):
+    bot.send_message(message.chat.id, "🎨 Нейросеть рисует образ... Это займет до 30 секунд.")
+    try:
+        # Используем модель gpt-image-2 согласно инструкции Codex
+        image_params = {
+            "model": "gpt-image-2",
+            "prompt": prompt,
+            "n": 1,
+            "size": "1024x1024"
+        }
+        # Если есть референс, добавляем его (зависит от поддержки API прокси)
+        if ref_url:
+            image_params["image"] = ref_url 
+
+        response = client_ai.images.generate(**image_params)
+        image_url = response.data[0].url
+        bot.send_photo(message.chat.id, image_url, caption="Готовый результат для Леи ✨")
+        
+        # Очищаем состояние
+        del user_states[message.chat.id]['current_img_prompt']
+    except Exception as e:
+        bot.reply_to(message, f"❌ Ошибка визуализации: {e}")
+
+# --- ОСТАЛЬНАЯ ЛОГИКА (Lore, Save) ---
 
 @bot.message_handler(func=lambda message: message.text in ["🌅 Утро", "☀️ День", "🌆 Вечер", "🌃 Ночь"])
-def handle_time_selection(message):
-    time_of_day = message.text
-    generate_content(message, time_of_day)
+def handle_time(message):
+    generate_lore(message, message.text)
 
-@bot.message_handler(func=lambda message: message.text == "✨ Свой сюжет")
-def custom_wish_start(message):
-    msg = bot.send_message(message.chat.id, "Что сегодня должно произойти с Леей? Напиши кратко свои пожелания:")
-    bot.register_next_step_handler(msg, handle_custom_wish)
-
-def handle_custom_wish(message):
-    wish = message.text
-    generate_content(message, "Любое", wish)
-
-@bot.message_handler(func=lambda message: message.text == "💾 Сохранить в память")
-def save_to_memory(message):
-    last_text = user_states.get(message.chat.id, {}).get('last_lore')
-    if not last_text:
-        bot.reply_to(message, "Сначала сгенерируй что-нибудь!")
-        return
-    
+def generate_lore(message, time_of_day):
+    bot.send_message(message.chat.id, "⏳ Придумываю продолжение истории...")
     try:
-        # Извлекаем только блок Lore
-        lore_to_save = last_text.split("2. Промпт")[0].replace("1. Событие дня (Lore):", "").strip()
-        supabase.table('leya_lore').insert({"event_description": lore_to_save}).execute()
-        bot.reply_to(message, "✅ Лея запомнила это событие!")
-    except Exception as e:
-        bot.reply_to(message, f"Ошибка сохранения: {e}")
-
-def generate_content(message, time_of_day, wish=None):
-    bot.send_message(message.chat.id, f"⏳ Работаю над образом... (Время: {time_of_day})")
-    try:
-        # Память
-        response = supabase.table('leya_lore').select('*').order('created_at', desc=True).limit(3).execute()
-        history = response.data
-        history_text = "\n".join([f"- {i['event_description']}" for i in history[::-1]]) if history else "Начало истории."
-
-        prompt = f"Контекст прошлых дней:\n{history_text}\n\n"
-        prompt += f"Задача: Опиши событие, которое происходит в это время суток: {time_of_day}. "
-        if wish:
-            prompt += f"Учти пожелание пользователя: {wish}"
-
-        ai_response = client_ai.chat.completions.create(
+        # Запрос истории из Supabase
+        res = supabase.table('leya_lore').select('*').order('created_at', desc=True).limit(3).execute()
+        history = "\n".join([f"- {i['event_description']}" for i in res.data[::-1]]) if res.data else "Начало."
+        
+        ai_res = client_ai.chat.completions.create(
             model="gpt-5.5",
-            messages=[{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": prompt}]
+            messages=[
+                {"role": "system", "content": "Ты - продюсер Леи. Выдай: 1. Lore 2. Пост 3. Visual Prompt (EN)."},
+                {"role": "user", "content": f"История:\n{history}\n\nВремя: {time_of_day}. Создай сюжет."}
+            ]
         )
+        answer = ai_res.choices[0].message.content
         
-        full_text = ai_response.choices[0].message.content
-        # Сохраняем в сессию, чтобы кнопка 'Сохранить' знала, что записывать
-        user_states[message.chat.id] = {'last_lore': full_text}
+        # Сохраняем промпты в сессию
+        v_prompt = answer.split("3. Visual Prompt:")[1].strip() if "3. Visual Prompt:" in answer else ""
+        user_states[message.chat.id] = {'last_lore': answer, 'last_visual_prompt': v_prompt}
         
-        bot.send_message(message.chat.id, full_text, reply_markup=get_main_keyboard())
+        bot.send_message(message.chat.id, answer, reply_markup=get_main_keyboard())
     except Exception as e:
-        bot.reply_to(message, f"❌ Ошибка: {e}")
+        bot.reply_to(message, f"Ошибка: {e}")
 
 @app.route('/', methods=['GET'])
 def index():
-    return "Leya Admin Panel Active"
+    return "Leya's brain and eyes are active!"
